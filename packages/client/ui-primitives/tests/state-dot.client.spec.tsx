@@ -22,7 +22,7 @@ describe('StateDot', () => {
     expect(spinner.tagName).toBe('svg')
     expect(spinner.querySelectorAll('rect')).toHaveLength(0)
     expect(spinner.getAttribute('viewBox')).toBe('0 0 24 24')
-    expect(spinner.querySelector('g')).not.toBeNull()
+    expect(spinner.querySelector('g')).toBeNull()
     const rings = spinner.querySelectorAll('circle')
     expect(rings).toHaveLength(2)
     expect([...rings].map(ring => ring.getAttribute('r'))).toEqual(['9.5', '9.5'])
@@ -73,7 +73,7 @@ describe('StateDot ongoing phase', () => {
     proto.getAnimations = getAnimations
     try {
       const { unmount } = render(<StateDot state="ongoing" />)
-      expect(getAnimations).toHaveBeenCalledWith({ subtree: true })
+      expect(getAnimations).toHaveBeenCalledWith()
       expect(animations.map(animation => animation.startTime)).toEqual([0, 0])
       unmount()
       expect(getAnimations).toHaveBeenCalledTimes(1)

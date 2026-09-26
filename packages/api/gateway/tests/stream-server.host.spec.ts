@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import {
   RemoteStreamMuxServer,
+  type RemoteStreamDeflate,
   type RemoteStreamFailureMapper,
   type RemoteStreamOpener,
 } from '../src/stream-server.ts'
@@ -485,6 +486,34 @@ describe('Remote stream mux server uplink', () => {
   })
 })
 
+describe('Remote stream mux server compression', () => {
+  const snapshot = { rows: Array.from({ length: 2_000 }, (_, index) => ({ index, text: 'repeated session row text' })) }
+
+  it('negotiates permessage-deflate and delivers a large item intact', async () => {
+    const entry = await startMux(async () => oneItem(snapshot), 2_000, 262_144, undefined, { level: 1, thresholdBytes: 1_024 })
+    const client = await connect(entry.url)
+    expect(client.extensions).toContain('permessage-deflate')
+    const frames = collectFrames(client)
+    client.send(openFrame('large'))
+    await vi.waitFor(() => { expect(frames.some(frame => frame.type === 'end')).toBe(true) })
+    expect(frames[0]).toEqual({ type: 'item', streamId: 'large', value: snapshot })
+    client.close()
+    await once(client, 'close')
+  })
+
+  it('declines permessage-deflate when compression is disabled', async () => {
+    const entry = await startMux(async () => oneItem(snapshot), 2_000, 262_144, undefined, false)
+    const client = await connect(entry.url)
+    expect(client.extensions).toBe('')
+    client.close()
+    await once(client, 'close')
+  })
+})
+
+async function* oneItem(value: unknown): AsyncIterable<unknown> {
+  yield value
+}
+
 const mapFailure: RemoteStreamFailureMapper = (error) => {
   const remote = remoteErrorOf(error)
   if (remote !== undefined) return { code: remote.code, message: remote.message, details: remote.details }
@@ -500,9 +529,10 @@ async function startMux(
   heartbeatIntervalMs = 2_000,
   streamInboxBytes = 262_144,
   peer?: PeerScope,
+  deflate: RemoteStreamDeflate = false,
 ): Promise<RunningMux> {
   const admitted = peer ?? await fixturePeer()
-  const mux = new RemoteStreamMuxServer(open, mapFailure, heartbeatIntervalMs, streamInboxBytes)
+  const mux = new RemoteStreamMuxServer(open, mapFailure, heartbeatIntervalMs, streamInboxBytes, deflate)
   const http = createServer()
   http.on('upgrade', (request, socket, head) => { mux.handleUpgrade(request, socket, head, admitted) })
   await new Promise<void>((resolve, reject) => {

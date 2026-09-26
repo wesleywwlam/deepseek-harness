@@ -412,15 +412,31 @@ describe('Typert Remote streams', () => {
     expect(() => { startup.commit() }).not.toThrow()
   })
 
-  it('validates the WebSocket heartbeat timer range and the stream inbox bound', () => {
-    expect(TypertGatewayService.Config({})).toEqual({ websocketHeartbeatIntervalMs: 2_000, streamInboxBytes: 262_144 })
-    expect(TypertGatewayService.Config({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1 }))
-      .toEqual({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1 })
+  it('validates the WebSocket heartbeat timer range, the stream inbox bound, and deflate settings', () => {
+    expect(TypertGatewayService.Config({})).toEqual({
+      websocketHeartbeatIntervalMs: 2_000,
+      streamInboxBytes: 262_144,
+      websocketDeflate: { level: 1, thresholdBytes: 1_024 },
+    })
+    expect(TypertGatewayService.Config({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, websocketDeflate: false }))
+      .toEqual({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, websocketDeflate: false })
+    expect(TypertGatewayService.Config({ websocketDeflate: { level: 9, thresholdBytes: 0 } }).websocketDeflate)
+      .toEqual({ level: 9, thresholdBytes: 0 })
     for (const websocketHeartbeatIntervalMs of [0, 1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ websocketHeartbeatIntervalMs })).toThrow()
     }
     for (const streamInboxBytes of [0, 1.5]) {
       expect(() => TypertGatewayService.Config({ streamInboxBytes })).toThrow()
+    }
+    const invalidDeflate = [
+      true,
+      { level: 10, thresholdBytes: 0 },
+      { level: 1.5, thresholdBytes: 0 },
+      { level: 1, thresholdBytes: -1 },
+      { level: 1 },
+    ]
+    for (const websocketDeflate of invalidDeflate) {
+      expect(() => TypertGatewayService.Config({ websocketDeflate } as never)).toThrow()
     }
   })
 
@@ -755,6 +771,7 @@ describe('Typert Remote streams', () => {
       headers: { cookie: browserCookie(ctx) },
     })
     await once(socket, 'open')
+    expect(socket.extensions).toContain('permessage-deflate')
     const frames: Record<string, unknown>[] = []
     socket.on('message', (data) => { frames.push(JSON.parse(rawText(data)) as Record<string, unknown>) })
 

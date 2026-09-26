@@ -32,22 +32,23 @@ describe('StateDot.module.css', () => {
   it('keeps ongoing on the rotating spinner rather than a solid-dot rule', () => {
     expect(css).not.toContain(".dot[data-state='ongoing']")
     expect(css).toContain('.spinnerTrack')
-    expect(css).toContain('.spinnerArc')
+    expect(css).toMatch(/\.spinnerArc\s*\{[^}]*stroke-dasharray: 18 150;[^}]*stroke-dashoffset: -3/su)
     expect(css).toContain('@keyframes dsh-state-dot-spin')
-    expect(css).toContain('@keyframes dsh-state-dot-dash')
-    expect(css).toMatch(/\.spinnerMotion[^{]*\{[^}]*animation: dsh-state-dot-spin 1\.5s linear infinite/su)
-    expect(css).not.toMatch(/\.spinner\s*\{[^}]*animation:/su)
-    expect(css).toContain('stroke-dasharray: 12 150')
-    expect(css).toContain('stroke-dasharray: 24 150')
-    expect(css).toContain('stroke-dashoffset: -6')
   })
 
-  it('stops both animations and retains an intermediate arc for reduced motion', () => {
+  it('animates only compositor-driven properties, on the outer svg', () => {
+    // stroke-dash* and transforms on inner SVG nodes re-run style and layout every frame on the main thread.
+    const keyframes = [...css.matchAll(/@keyframes [\w-]+\s*\{((?:[^{}]*\{[^}]*\})*)\s*\}/gu)].map(match => match[1] ?? '')
+    expect(keyframes.length).toBeGreaterThan(0)
+    for (const body of keyframes) {
+      const properties = [...body.matchAll(/([\w-]+)\s*:/gu)].map(match => match[1])
+      expect(properties.every(property => property === 'transform' || property === 'opacity')).toBe(true)
+    }
+    expect(css).toMatch(/\.spinner\s*\{[^}]*animation: dsh-state-dot-spin 1\.5s linear infinite/su)
+  })
+
+  it('stops the rotation for reduced motion', () => {
     const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'))
-    expect(reduced).toContain('.spinnerMotion,')
-    expect(reduced).toContain('.spinnerArc')
-    expect(reduced).toContain('animation: none')
-    expect(reduced).toContain('stroke-dasharray: 18 150')
-    expect(reduced).toContain('stroke-dashoffset: -3')
+    expect(reduced).toMatch(/\.spinner\s*\{\s*animation: none/su)
   })
 })

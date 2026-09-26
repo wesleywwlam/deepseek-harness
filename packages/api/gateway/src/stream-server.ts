@@ -34,6 +34,14 @@ type BoundStreamOpener = (
   control: AbortController,
 ) => Promise<AsyncIterable<unknown>>
 
+/** permessage-deflate settings the mux offers, or `false` to decline the extension. */
+export type RemoteStreamDeflate = false | {
+  /** zlib level from 0 through 9. */
+  readonly level: number
+  /** Messages smaller than this many bytes are sent uncompressed. */
+  readonly thresholdBytes: number
+}
+
 /** Convert an invocation or carrier failure to a stable wire value. */
 export type RemoteStreamFailureMapper = (error: unknown) => RemoteStreamFailure
 
@@ -41,7 +49,7 @@ const MAX_MISSED_HEARTBEATS = 2
 
 /** Own the no-server WebSocket acceptor and every active logical stream. */
 export class RemoteStreamMuxServer {
-  private readonly server = new WebSocketServer({ noServer: true })
+  private readonly server: WebSocketServer
   private readonly connections = new Set<Promise<void>>()
   private readonly missedHeartbeats = new WeakMap<WebSocket, number>()
   private heartbeatTimer: NodeJS.Timeout | undefined
@@ -51,13 +59,22 @@ export class RemoteStreamMuxServer {
    * @param failure - Gateway error-to-wire mapper.
    * @param heartbeatIntervalMs - interval between WebSocket Ping control frames.
    * @param streamInboxBytes - buffered uplink frame bytes one logical stream may hold before it fails.
+   * @param deflate - permessage-deflate settings, or `false` to decline the extension.
    */
   constructor(
     private readonly open: RemoteStreamOpener,
     private readonly failure: RemoteStreamFailureMapper,
     private readonly heartbeatIntervalMs: number,
     private readonly streamInboxBytes: number,
-  ) {}
+    deflate: RemoteStreamDeflate,
+  ) {
+    this.server = new WebSocketServer({
+      noServer: true,
+      perMessageDeflate: deflate === false
+        ? false
+        : { zlibDeflateOptions: { level: deflate.level }, threshold: deflate.thresholdBytes },
+    })
+  }
 
   /**
    * Upgrade one admitted request and begin serving its logical streams. Every

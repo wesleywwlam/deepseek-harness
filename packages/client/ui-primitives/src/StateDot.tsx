@@ -19,7 +19,7 @@ function syncSpinner(element: SVGSVGElement | null): void {
   // jsdom (the unit lane) implements no Web Animations despite lib.dom's
   // non-optional typing; the optional call leaves that lane unsynced.
   const spinner = element as { getAnimations?: SVGSVGElement['getAnimations'] }
-  for (const animation of spinner.getAnimations?.({ subtree: true }) ?? []) animation.startTime = 0
+  for (const animation of spinner.getAnimations?.() ?? []) animation.startTime = 0
 }
 
 /**
@@ -48,10 +48,8 @@ export function StateDot({ state, size, className, appearance = 'dot' }: {
         viewBox="0 0 24 24"
         aria-hidden="true"
       >
-        <g className={css.spinnerMotion}>
-          <circle className={css.spinnerTrack} cx="12" cy="12" r="9.5" />
-          <circle className={css.spinnerArc} cx="12" cy="12" r="9.5" />
-        </g>
+        <circle className={css.spinnerTrack} cx="12" cy="12" r="9.5" />
+        <circle className={css.spinnerArc} cx="12" cy="12" r="9.5" />
       </svg>
     )
   }

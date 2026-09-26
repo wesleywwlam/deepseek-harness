@@ -165,6 +165,31 @@ describe('web-app runtime glue', () => {
     await ctx.fiber.dispose()
   })
 
+  it('serves the frontend build\'s content-hashed directories as immutable', async () => {
+    const index = stageDist()
+    for (const directory of ['assets', 'preview']) {
+      mkdirSync(join(index, '..', directory))
+      writeFileSync(join(index, '..', directory, 'chunk-Ab12Cd34.js'), 'export {}')
+    }
+    writeFileSync(join(index, '..', 'favicon.svg'), '<svg/>')
+    const ctx = new Context()
+    const { server, seat } = fakeHttpServer()
+    ctx.provide('webServer', server)
+    provideConnection(ctx)
+    provideLoader(ctx)
+    apply(ctx, new Config({ openBrowser: false, printUrl: false, surfaceContext: false, trustedHosts: [] }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const handler = seat() as (req: { method: string; url: string }, res: unknown) => Promise<void>
+    const cacheControl = async (url: string): Promise<unknown> => {
+      const writeHead = vi.fn()
+      await handler({ method: 'GET', url }, { writeHead, end: vi.fn() })
+      return (writeHead.mock.calls[0]?.[1] as Record<string, unknown> | undefined)?.['cache-control']
+    }
+    expect(await cacheControl('/assets/chunk-Ab12Cd34.js')).toBe('public, max-age=31536000, immutable')
+    expect(await cacheControl('/preview/chunk-Ab12Cd34.js')).toBe('public, max-age=31536000, immutable')
+    expect(await cacheControl('/favicon.svg')).toBe('no-cache')
+  })
+
   it('publishes no readiness side effect when printing and browser opening are disabled', async () => {
     stageDist()
     const ctx = new Context()

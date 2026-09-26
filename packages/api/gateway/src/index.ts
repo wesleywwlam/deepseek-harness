@@ -44,6 +44,7 @@ import type {
 import {
   RemoteStreamMuxServer,
   rejectRemoteStreamUpgrade,
+  type RemoteStreamDeflate,
 } from './stream-server.ts'
 import {
   REMOTE_EVENT_STREAM_ENDPOINT,
@@ -77,6 +78,7 @@ export type {
   TypertRemoteEventSource,
 } from './types.ts'
 export type { RemoteEventHostInfo } from './stream-protocol.ts'
+export type { RemoteStreamDeflate } from './stream-server.ts'
 
 interface GatewayErrorOptions {
   readonly cause?: unknown
@@ -136,6 +138,7 @@ type ConnectionRpcError = Extract<ConnectionRpcResult, { readonly ok: false }>['
 const NEVER_ABORTED_SIGNAL = new AbortController().signal
 const DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2_000
 const DEFAULT_STREAM_INBOX_BYTES = 262_144
+const DEFAULT_WEBSOCKET_DEFLATE = { level: 1, thresholdBytes: 1_024 } as const
 const EMPTY_ASYNC_ITERABLE: AsyncIterable<never> = {
   [Symbol.asyncIterator]: () => ({ next: () => Promise.resolve({ value: undefined, done: true }) }),
 }
@@ -148,11 +151,18 @@ export interface Config {
   readonly websocketHeartbeatIntervalMs?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
   readonly streamInboxBytes?: number
+  /**
+   * permessage-deflate for `/api/remote.mux` frames, or `false` to send them uncompressed.
+   * Level 1 costs little CPU on loopback and shrinks session snapshots for tailnet and LAN Clients.
+   * @default { level: 1, thresholdBytes: 1024 }
+   */
+  readonly websocketDeflate?: RemoteStreamDeflate
 }
 
 interface ResolvedConfig extends Config {
   readonly websocketHeartbeatIntervalMs: number
   readonly streamInboxBytes: number
+  readonly websocketDeflate: RemoteStreamDeflate
 }
 
 /**
@@ -202,6 +212,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
     websocketHeartbeatIntervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS)
       .default(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS),
     streamInboxBytes: z.number().step(1).min(1).default(DEFAULT_STREAM_INBOX_BYTES),
+    websocketDeflate: z.union([
+      z.const(false),
+      z.object({
+        level: z.number().step(1).min(0).max(9).required(),
+        thresholdBytes: z.number().step(1).min(0).required(),
+      }),
+    ]).default(DEFAULT_WEBSOCKET_DEFLATE),
   })
 
   /** Carrier adapter shared by the WebSocket mux and local Host transports. */
@@ -245,6 +262,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
           this.wireStream.failure,
           resolved.websocketHeartbeatIntervalMs,
           resolved.streamInboxBytes,
+          resolved.websocketDeflate,
         )
         webCtx.effect(function* () {
           yield () => mux.close()

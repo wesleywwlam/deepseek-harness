@@ -14,7 +14,7 @@
 
 import type { ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
-import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
+import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -26,15 +26,24 @@ export const name = 'frontend-static'
 /** Services required before the authenticated fallback seat can be claimed. */
 export const inject = ['webServer', 'connection']
 
-/** Plugin config: the dist anchor. */
+/** Plugin config: the dist anchor and its content-hashed directories. */
 export interface Config {
   /** Absolute path of index.html inside the dist root. */
   distIndex: string
+  /**
+   * Dist-relative directory prefixes (each ending in `/`) whose files carry a
+   * content hash in their names and are served `immutable`. @default []
+   */
+  immutablePathPrefixes?: string[]
 }
 
 export const Config: z<Config> = z.object({
   distIndex: z.string().required(),
+  immutablePathPrefixes: z.array(z.string().pattern(/^[^/\\.][^\\]*\/$/u)).default([]),
 })
+
+const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
+const REVALIDATE_CACHE = 'no-cache'
 
 const HTML_MIME = 'text/html; charset=utf-8'
 
@@ -67,11 +76,13 @@ const STATIC_MISS_CODES: ReadonlySet<string | undefined> = new Set([
  * @param authorizeIndex - authenticates an index response before its bytes are read.
  * @param renderIndex - produces the index.html body (structured injection
  * rendering) for the dist root and configured index path.
+ * @param immutablePathPrefixes - dist-relative `/`-terminated prefixes served `immutable`; every other 200 is `no-cache`.
  */
 export async function serveStatic(
   pathname: string, res: ServerResponse, distRoot: string, distIndex: string,
   authorizeIndex: () => boolean,
   renderIndex: () => Promise<string>,
+  immutablePathPrefixes: readonly string[] = [],
 ): Promise<void> {
   const target = resolve(normalize(join(distRoot, pathname)))
   // Traversal rejection: the target must be distRoot itself (`/`) or stay under
@@ -101,7 +112,9 @@ export async function serveStatic(
     res.end()
     return
   }
-  res.writeHead(200, { 'content-type': type })
+  const distPath = relative(distRoot, target).split(sep).join('/')
+  const immutable = type !== HTML_MIME && immutablePathPrefixes.some(prefix => distPath.startsWith(prefix))
+  res.writeHead(200, { 'content-type': type, 'cache-control': immutable ? IMMUTABLE_CACHE : REVALIDATE_CACHE })
   res.end(body)
 }
 
@@ -135,6 +148,7 @@ export function apply(ctx: Context, config: Config): void {
       distIndex,
       () => ctx.connection.authorizeIndex(req, res),
       renderIndex,
+      config.immutablePathPrefixes ?? [],
     )
   }), 'frontend-static: fallback seat')
 }

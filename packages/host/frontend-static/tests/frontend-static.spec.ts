@@ -40,6 +40,8 @@ async function loadComposition(): Promise<Context> {
   await writeFile(join(dist, 'blob.bin'), 'BLOB')
   await writeFile(join(dist, 'manifest.webmanifest'), '{}')
   await mkdir(join(dist, 'empty'))
+  await mkdir(join(dist, 'assets'))
+  await writeFile(join(dist, 'assets', 'app-Ab12Cd34.js'), 'export {}')
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-credentials-local'",
@@ -55,6 +57,8 @@ async function loadComposition(): Promise<Context> {
     "  name: '@deepseek-ai/dsh-host-frontend-static'",
     '  config:',
     `    distIndex: '${distIndex}'`,
+    '    immutablePathPrefixes:',
+    "      - 'assets/'",
     '',
   ].join('\n'))
 
@@ -92,6 +96,17 @@ async function request(port: number, path: string, init?: RequestInit): Promise<
     body: await response.text(),
   }
 }
+
+describe('Config', () => {
+  it('accepts only dist-relative directory prefixes', () => {
+    expect(FrontendStatic.Config({ distIndex: '/d/index.html' }).immutablePathPrefixes).toEqual([])
+    expect(FrontendStatic.Config({ distIndex: '/d/index.html', immutablePathPrefixes: ['assets/', 'preview/x/'] }).immutablePathPrefixes)
+      .toEqual(['assets/', 'preview/x/'])
+    for (const prefix of ['assets', '/assets/', '../assets/', './assets/', '', 'a\\b/']) {
+      expect(() => FrontendStatic.Config({ distIndex: '/d/index.html', immutablePathPrefixes: [prefix] })).toThrow()
+    }
+  })
+})
 
 describe('real Loader composition', () => {
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
@@ -133,6 +148,17 @@ describe('real Loader composition', () => {
       type: 'text/javascript; charset=utf-8',
       body: '',
     })
+    // Content-hashed paths are cacheable forever; everything else revalidates on every read.
+    const hashed = await fetch(`http://127.0.0.1:${String(port)}/assets/app-Ab12Cd34.js`)
+    expect(hashed.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+    const unhashed = await fetch(`http://127.0.0.1:${String(port)}/app.js`)
+    expect(unhashed.headers.get('cache-control')).toBe('no-cache')
+    const index = await fetch(`http://127.0.0.1:${String(port)}/`, authenticated())
+    expect(index.headers.get('cache-control')).toBe('no-cache')
+    for (const traversal of ['/assets/../app.js', '/assets']) {
+      const got = await fetch(`http://127.0.0.1:${String(port)}${traversal}`)
+      expect(got.headers.get('cache-control')).not.toBe('public, max-age=31536000, immutable')
+    }
     await writeFile(join(root!, 'dist', 'app.js'), 'export const rebuilt = true')
     expect(await request(port, '/app.js')).toMatchObject({ status: 200, body: 'export const rebuilt = true' })
 
