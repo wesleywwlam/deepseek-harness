@@ -24,10 +24,10 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
-import { dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
@@ -56,7 +56,11 @@ interface WebBootRowFields {
   immediately: boolean
 }
 
-/** Filesystem baseline captured before a client artifact snapshot is read. */
+/**
+ * Filesystem baseline captured before a client artifact snapshot is read. It
+ * seeds and triggers the HMR bundle watch; artifact revisions come from the
+ * artifact bytes, never from these values.
+ */
 export interface ClientArtifactBaseline {
   /** Absolute path of the client bundle. */
   readonly path: string
@@ -210,15 +214,36 @@ function shortHash(input: string): string {
 }
 
 /** Hash several response fields without allowing bytes to move across field boundaries. */
-function framedHash(domain: string, parts: readonly string[]): string {
+function framedHash(domain: string, parts: readonly (string | Buffer)[]): string {
   const hash = createHash('sha1').update(domain).update('\0')
   for (const part of parts) hash.update(`${String(Buffer.byteLength(part))}:`).update(part)
   return hash.digest('hex').slice(0, HASH_REVISION_LENGTH)
 }
 
-/** Identify an entry's build from filesystem metadata without hashing its contents. */
-function artifactRevision(baseline: ClientArtifactBaseline): string {
-  return framedHash('plugin-artifact', [String(baseline.mtimeMs), String(baseline.ctimeMs), String(baseline.size)])
+/** One package's emitted client artifacts: the entry bundle and every sibling chunk the loader can fetch. */
+const CLIENT_ARTIFACT_FILE = /^client(?:\.[A-Za-z0-9][A-Za-z0-9._-]*)?\.js$/u
+
+/**
+ * Derive one entry's revision from the bytes of its emitted client artifacts, so a
+ * rebuild changes the revision only when a served byte changes while unchanged
+ * artifacts keep their revision across Host restarts.
+ *
+ * The artifact set spans the entry bundle and its sibling chunks because a chunk
+ * URL carries its owner's revision, so a chunk-only rebuild must still invalidate
+ * the owner. Source maps stay outside the set: a map-only change must not reload
+ * the plugin.
+ * @param clientPath - absolute path of the entry bundle.
+ * @param entry - entry bytes the caller already read, avoiding a second read.
+ * @returns the content revision of the entry's artifact set.
+ */
+function artifactRevision(clientPath: string, entry?: Buffer): string {
+  const directory = dirname(clientPath)
+  const parts: (string | Buffer)[] = []
+  for (const name of readdirSync(directory).filter(name => CLIENT_ARTIFACT_FILE.test(name)).sort()) {
+    const published = name === basename(clientPath) ? entry : undefined
+    parts.push(name, published ?? readFileSync(join(directory, name)))
+  }
+  return framedHash('plugin-artifact', parts)
 }
 
 /** Absolute route prefix serving every plugin resource. */
@@ -706,18 +731,20 @@ export class ClientModuleRegistry extends Service {
   /**
    * Publish one completed bundle generation (the HMR watch's registration
    * hook — the only entry point through which build changes reach the graph).
-   * Unchanged mtime, ctime and size preserve the graph without reading the bundle.
+   * The revision tracks artifact bytes, so a rewrite that changes none of them
+   * keeps the current graph.
    * @param id - entry id (package name).
    * @returns the current artifact rev, or undefined for an unknown id.
    */
   rebuilt(id: string): string | undefined {
     const record = this.table.get(id)
     if (record === undefined) return undefined
-    const baseline = this.captureArtifactBaseline(record.meta.clientPath)
-    const rev = artifactRevision(baseline)
-    if (rev === record.entry.rev) return rev
+    // The build already wrote its output, so only the bytes can show whether this
+    // generation differs; the watch's metadata delta is the trigger, not the verdict.
     const bundle = readFileSync(record.meta.clientPath)
-    record.baseline = baseline
+    const rev = artifactRevision(record.meta.clientPath, bundle)
+    if (rev === record.entry.rev) return rev
+    record.baseline = this.captureArtifactBaseline(record.meta.clientPath)
     record.entry = graphRow(id, rev, record.meta)
     record.bundle = bundle
     this.composed = this.compose()
@@ -735,7 +762,7 @@ export class ClientModuleRegistry extends Service {
   }
 
   /**
-   * Subscribe to bundle rebuilds; fires only when artifact metadata changes the rev.
+   * Subscribe to bundle rebuilds; fires only when a rebuilt artifact changes the rev.
    * @param listener - receives the entry id and its new bundle rev.
    * @returns the unsubscriber.
    */
@@ -1034,9 +1061,10 @@ export class ClientModuleRegistry extends Service {
     const source = sources[0]
     if (source === undefined) return this.table.delete(packageName)
     if (this.table.get(packageName)?.sourceKey === source.sourceKey) return false
-    // Startup and HMR share revisions so unchanged artifacts survive a server restart.
+    // Startup and HMR derive the same content revision, so unchanged artifacts
+    // survive a server restart with the revision the browser already cached.
     const snapshot = this.initialBundleSnapshot(packageName, source.meta.clientPath)
-    const rev = artifactRevision(snapshot.baseline)
+    const rev = artifactRevision(source.meta.clientPath, snapshot.bundle)
     this.table.set(packageName, {
       entry: graphRow(packageName, rev, source.meta),
       loaderName: source.loaderName,

@@ -719,8 +719,8 @@ describe('client bundle activation', () => {
     expect(onGraphChanged).not.toHaveBeenCalled()
   })
 
-  it('hashes only metadata when publishing initial and rebuilt artifact revisions', () => {
-    const packageName = '@fixture/metadata-revision'
+  it('hashes artifact contents when publishing initial and rebuilt artifact revisions', () => {
+    const packageName = '@fixture/content-revision'
     const clientPath = writePackage(packageName)
     mkdirSync(dirname(clientPath), { recursive: true })
     const bundle = `module.exports = ${JSON.stringify('x'.repeat(64 * 1024))}\n`
@@ -734,8 +734,7 @@ describe('client bundle activation', () => {
       utimesSync(clientPath, before.atime, new Date(before.mtimeMs + 1_000))
       expect(service.rebuilt(packageName)).not.toBe(first)
       const inputBytes = update.mock.calls.map(([input]) => Buffer.byteLength(input))
-      expect(inputBytes.length).toBeGreaterThan(0)
-      expect(inputBytes.reduce((total, bytes) => total + bytes, 0)).toBeLessThan(4 * 1024)
+      expect(inputBytes.reduce((total, bytes) => total + bytes, 0)).toBeGreaterThan(64 * 1024)
     } finally {
       update.mockRestore()
     }
@@ -759,7 +758,10 @@ describe('client bundle activation', () => {
     }
 
     const rev = service.rebuilt(packageName)
-    expect(rev).not.toBe(before.entries[0]!.rev)
+    // Only rewritten bytes move the revision; a bare build stamp leaves the
+    // published graph — and the browser's cached revision — in place.
+    if (change === 'bytes') expect(rev).not.toBe(before.entries[0]!.rev)
+    else expect(rev).toBe(before.entries[0]!.rev)
     expect(construct([packageName]).graph()).toEqual(service.graph())
   })
 
@@ -875,9 +877,10 @@ describe('client bundle activation', () => {
     })
     expect((await routeRequest(route, `${row.url}&stale=1`.replace(`rev=${row.rev}`, 'rev=stale'))).status).toBe(404)
 
+    // A real rebuild rewrites the bundle alongside its map. Only changed bundle
+    // bytes move the revision: a map-only change must not reload the plugin.
+    writeFileSync(clientPath, 'module.exports = { changed: true }\n//# sourceMappingURL=client.js.map')
     writeFileSync(`${clientPath}.map`, '{"version":3,"names":[],"mappings":"AAAA","sources":["src/changed.tsx"]}\n')
-    const entryStat = statSync(clientPath)
-    utimesSync(clientPath, entryStat.atime, new Date(entryStat.mtimeMs + 1_000))
     const nextRev = service.rebuilt(packageName)
     expect(nextRev).not.toBe(row.rev)
     const nextRow = service.graph().entries[0]!
@@ -915,7 +918,7 @@ describe('client bundle activation', () => {
     expect((await routeRequest(route, url.replace(`rev=${row.rev}`, 'rev=stale'))).status).toBe(404)
   })
 
-  it('publishes a new chunk revision when a completed build rewrites only the entry timestamp', async () => {
+  it('publishes a new chunk revision when a rebuild changes only a sibling chunk', async () => {
     const packageName = '@fixture/chunk-only-rebuild'
     const clientPath = writePackage(packageName)
     const chunkPath = join(dirname(clientPath), 'client.terminal.js')
@@ -927,10 +930,9 @@ describe('client bundle activation', () => {
     const firstUrl = chunkReference(packageName, 'client.terminal.js', firstRow.rev)
     expect((await routeRequest(route, firstUrl)).body.toString('utf8')).toContain('generation: 1')
 
+    // The entry keeps its bytes and its timestamp: only the chunk differs, and a
+    // chunk URL carries its owner's revision, so the owner revision must move.
     writeFileSync(chunkPath, 'module.exports = { generation: 2 }\n')
-    const entryStat = statSync(clientPath)
-    const completed = new Date(entryStat.mtimeMs + 1_000)
-    utimesSync(clientPath, entryStat.atime, completed)
     const nextRev = service.rebuilt(packageName)!
     expect(nextRev).not.toBe(firstRow.rev)
     expect((await routeRequest(route, firstUrl)).status).toBe(404)
