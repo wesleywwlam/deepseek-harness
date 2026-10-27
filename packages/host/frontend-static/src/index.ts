@@ -8,9 +8,11 @@
  * authentication and renders for the browser Peer; an in-process read renders
  * for the Peer its caller admitted. Both renders go through the webserver's
  * index render (structured injection rows, then raw taps). Non-index assets
- * stay public; every file other than the index carries a weak ETag with
- * `cache-control: no-cache` and answers a matching `If-None-Match` with 304,
- * while the index carries no cache headers. The dist location is workspace
+ * stay public; files under an `immutablePathPrefixes` entry carry
+ * `cache-control: public, max-age=31536000, immutable`, and every other
+ * non-index file carries a weak ETag with `cache-control: no-cache` and
+ * answers a matching `If-None-Match` with 304, while the index carries no
+ * cache headers. The dist location is workspace
  * knowledge of the composing application, so `distIndex` is typically
  * supplied through a `!!js` expression, never hardcoded by a deployment.
  * @module @deepseek-ai/dsh-host-frontend-static
@@ -18,7 +20,7 @@
 
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
+import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -30,15 +32,24 @@ export const name = 'frontend-static'
 /** Services required before the authenticated fallback seat can be claimed. */
 export const inject = ['webServer', 'connection']
 
-/** Plugin config: the dist anchor. */
+/** Plugin config: the dist anchor and its content-hashed directories. */
 export interface Config {
   /** Absolute path of index.html inside the dist root. */
   distIndex: string
+  /**
+   * Dist-relative directory prefixes (each ending in `/`) whose files carry a
+   * content hash in their names and are served `immutable`. @default []
+   */
+  immutablePathPrefixes?: string[]
 }
 
 export const Config: z<Config> = z.object({
   distIndex: z.string().required(),
+  immutablePathPrefixes: z.array(z.string().pattern(/^[^/\\.][^\\]*\/$/u)).default([]),
 })
+
+const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
+const REVALIDATE_CACHE = 'no-cache'
 
 const HTML_MIME = 'text/html; charset=utf-8'
 
@@ -85,15 +96,20 @@ function bytesBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * the response to send instead of the index, or undefined to serve it.
  * @param renderIndex - turns the raw index.html body into the served document
  * for the dist root and configured index path.
+ * @param immutablePathPrefixes - dist-relative `/`-terminated prefixes served
+ * `immutable`; every other file revalidates with `no-cache`.
  * @returns the dist response; a HEAD response carries the GET status and
- * headers without a body. A file other than the index carries
- * `cache-control: no-cache` and a weak ETag from a SHA-1 of its bytes, and a
- * request whose `If-None-Match` equals that ETag receives an empty 304.
+ * headers without a body. A file other than the index under an immutable
+ * prefix carries `cache-control: public, max-age=31536000, immutable`; every
+ * other file carries a weak ETag with `cache-control: no-cache` and answers a
+ * matching `If-None-Match` with an empty 304. The index carries no cache
+ * headers.
  */
 async function serveStatic(
   request: Request, distRoot: string, distIndex: string,
   authorizeIndex: () => Response | undefined,
   renderIndex: (html: string) => string,
+  immutablePathPrefixes: readonly string[] = [],
 ): Promise<Response> {
   const target = resolve(normalize(join(distRoot, decodeURIComponent(new URL(request.url).pathname))))
   // Traversal rejection: the target must be distRoot itself (`/`) or stay under
@@ -110,10 +126,15 @@ async function serveStatic(
       headers = { 'content-type': HTML_MIME }
     } else {
       body = await readFile(target)
-      // Weak: gzip changes the transferred bytes.
-      const cache = { 'cache-control': 'no-cache', etag: `W/"${createHash('sha1').update(body).digest('base64url')}"` }
-      if (request.headers.get('if-none-match') === cache.etag) return new Response(null, { status: 304, headers: cache })
-      headers = { 'content-type': MIME[extname(target)] ?? 'application/octet-stream', ...cache }
+      const distPath = relative(distRoot, target).split(sep).join('/')
+      if (immutablePathPrefixes.some(prefix => distPath.startsWith(prefix))) {
+        headers = { 'content-type': MIME[extname(target)] ?? 'application/octet-stream', 'cache-control': IMMUTABLE_CACHE }
+      } else {
+        // Weak: gzip changes the transferred bytes.
+        const cache = { 'cache-control': REVALIDATE_CACHE, etag: `W/"${createHash('sha1').update(body).digest('base64url')}"` }
+        if (request.headers.get('if-none-match') === cache.etag) return new Response(null, { status: 304, headers: cache })
+        headers = { 'content-type': MIME[extname(target)] ?? 'application/octet-stream', ...cache }
+      }
     }
   } catch (error) {
     // Only absent or non-file targets are 404; other filesystem failures reach
@@ -162,6 +183,7 @@ export function apply(ctx: Context, config: Config): void {
       // reference they insert.
       html => ctx.webServer.renderIndex(html, peer ?? ctx.connection.browserPeer)
         .replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`),
+      config.immutablePathPrefixes,
     ),
   }), 'frontend-static: fallback seat')
 }

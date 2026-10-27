@@ -849,6 +849,7 @@ describe('Typert Remote streams', () => {
       headers: { cookie: browserCookie(ctx) },
     })
     await once(socket, 'open')
+    expect(socket.extensions).toContain('permessage-deflate')
     const frames: Record<string, unknown>[] = []
     socket.on('message', (data) => { frames.push(JSON.parse(rawText(data)) as Record<string, unknown>) })
 

@@ -203,7 +203,8 @@ export function apply(ctx: Context, config: Config): void {
   /** The advertised root: the canonical `publicUrl`, or the listener's own origin. */
   const appRootUrl = (): string => publicUrl ?? ctx.webServer.getOrigin()
   ctx.provide('webApp', { getAdvertisedUrl: appRootUrl } satisfies WebApp)
-  ctx.plugin(FrontendStatic, { distIndex: internals.resolveDistIndex() })
+  // apps/web's Vite output puts only content-hashed files under these directories.
+  ctx.plugin(FrontendStatic, { distIndex: internals.resolveDistIndex(), immutablePathPrefixes: ['assets/', 'preview/'] })
   if (config.surfaceContext) {
     ctx.inject(['shellEnv'], (runtimeCtx) => {
       runtimeCtx.shellEnv.register({

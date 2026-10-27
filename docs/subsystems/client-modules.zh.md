@@ -85,7 +85,7 @@ interface WebBootGraph {
 }
 ```
 
-首次发布与 HMR 都从入口的 mtime、ctime 和大小派生每个 row 的 `rev`，不对可执行字节求哈希。相同产物会跨 Host 重启保持 revision。初始 descriptor 把 row 划入 bootstrap 与 application 两个调度阶段，每个阶段都可以包含多条 descriptor。URL 只含有序 package 资源列表和从这些 row revision 派生的 revision，阶段名不会进入路由。图组合保持 row 顺序，并在 map 形式 URL 超过 3 KiB 前贪心切分，不拼接脚本，也不读取 map。图 revision 对 entry 与 batch descriptor 求哈希。`immediately` 标记第一阶段的 registration barrier；同一 combo 中的 row 共享脚本传输，不同 combo 则独立加载。
+首次发布与 HMR 都从该 row 已产出产物的字节派生每个 row 的 `rev`——即入口 bundle 与其每个同级 chunk——因此只有被服务的字节变化时 revision 才移动，未变化的产物会跨 Host 重启保持 revision。source map 不属于该集合，因此仅 map 变化不会重新加载插件。初始 descriptor 把 row 划入 bootstrap 与 application 两个调度阶段，每个阶段都可以包含多条 descriptor。URL 只含有序 package 资源列表和从这些 row revision 派生的 revision，阶段名不会进入路由。图组合保持 row 顺序，并在 map 形式 URL 超过 3 KiB 前贪心切分，不拼接脚本，也不读取 map。图 revision 对 entry 与 batch descriptor 求哈希。`immediately` 标记第一阶段的 registration barrier；同一 combo 中的 row 共享脚本传输，不同 combo 则独立加载。
 
 `release` 把本包版本与 client 构建固化进 Host 构建产物的源码 commit 配成一对，不计入图 revision。只有 Host 提供页面启动时的 release，页面才应用图和 rebuilt 帧；其他 release 要等页面刷新（[Host release 变化](../../packages/client/modules/README.zh.md#host-release-changes)）。
 
@@ -104,7 +104,11 @@ interface WebBootGraph {
 ## 服务
 
 ```ts type-equiv
-/** Filesystem baseline captured before a client artifact snapshot is read. */
+/**
+ * Filesystem baseline captured before a client artifact snapshot is read. It
+ * seeds and triggers the HMR bundle watch; artifact revisions come from the
+ * artifact bytes, never from these values.
+ */
 interface ClientArtifactBaseline {
   /** Absolute path of the client bundle. */
   readonly path: string
@@ -117,7 +121,7 @@ interface ClientArtifactBaseline {
 }
 ```
 
-`ClientModuleRegistry`（`ctx.clientModules`，定义于 [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)）暴露读取面与重建面；签名见生成的[服务目录](#ctxclientmodules--clientmoduleregistry)。`graph()` 返回当前组合出的图（两次变更之间是同一个稳定对象），`clientPath(id)` 返回 bundle 的绝对路径，`artifactBaseline(id)` 返回读取当前快照前捕获的 bundle stat 值。`fetchBundle()` 返回与 HTTP 路由相同的响应：惰性的 bundle 响应，以及每次请求都读取的包资源。`rebuilt(id)` 发布没有伴随条目重启的 bundle 重建：它从文件系统元数据派生 revision，只有 revision 变化才会读取新字节、重新组合图并发出通知；条目重启则经对账发布。`onRebuilt` 按发生变化的 bundle 逐个触发并携带新 revision；`onGraphChanged` 在任何一次重新组合了图的 flush 之后触发（行的增删，或 rebuilt 带来的 revision 变化），并采用拉取模型——监听器自行重读 `graph()`。两条通知路径都会兜住监听器异常，因此一个抛错的订阅者既不能让后续订阅者被跳过，也不能杀死触发这次 flush 的一方。
+`ClientModuleRegistry`（`ctx.clientModules`，定义于 [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)）暴露读取面与重建面；签名见生成的[服务目录](#ctxclientmodules--clientmoduleregistry)。`graph()` 返回当前组合出的图（两次变更之间是同一个稳定对象），`clientPath(id)` 返回 bundle 的绝对路径，`artifactBaseline(id)` 返回读取当前快照前捕获的 bundle stat 值，用于播种并触发 HMR bundle watch。`fetchBundle()` 返回与 HTTP 路由相同的响应：惰性的 bundle 响应，以及每次请求都读取的包资源。`rebuilt(id)` 发布没有伴随条目重启的 bundle 重建：它从产物字节派生 revision，因此只有字节变化才会移动 revision、重新组合图并发出通知；条目重启则经对账发布。`onRebuilt` 按发生变化的 bundle 逐个触发并携带新 revision；`onGraphChanged` 在任何一次重新组合了图的 flush 之后触发（行的增删，或 rebuilt 带来的 revision 变化），并采用拉取模型——监听器自行重读 `graph()`。两条通知路径都会兜住监听器异常，因此一个抛错的订阅者既不能让后续订阅者被跳过，也不能杀死触发这次 flush 的一方。
 
 随包提供的 Web 组合通过 [`dsh-client-hmr`](../../packages/client/hmr/README.zh.md) 交付动态图快照。Host 立即转发现有图变化通知，重连会发送当前完整图。图描述浏览器的目标条目，不声明 Host 清理已经完成。产物轮询另外报告重建 revision。仅 source map 变化不会触发重载；新 combo-map URL 只会在 bundle revision 变化后出现，每份 map body 由其首次 `GET` 固定。Client Modules 校验快照，并将对账与重建串行协调；它持有启动创建的条目映射，负责单资源到达、异步移除、未使用模块与样式清理，以及页面本地重试状态。静态平台模块与 bootstrap 保持页面生命周期；Electron 安装属于独立流程。
 
@@ -177,7 +181,8 @@ artifactBaseline(id: string): ClientArtifactBaseline | undefined
 /**
  * Publish one completed bundle generation (the HMR watch's registration
  * hook; an entry restart publishes through reconciliation instead).
- * Unchanged mtime, ctime and size preserve the graph without reading the bundle.
+ * The revision tracks artifact bytes, so a rewrite that changes none of them
+ * keeps the current graph.
  * @param id - entry id (package name).
  * @returns the current artifact rev, or undefined for an unknown id.
  */

@@ -179,6 +179,36 @@ describe('web-app runtime glue', () => {
     expect(ctx.webApp.getAdvertisedUrl()).toBe('https://proxy.example:8443/web/')
   })
 
+  it('serves the frontend build\'s content-hashed directories as immutable', async () => {
+    const index = stageDist()
+    for (const directory of ['assets', 'preview']) {
+      mkdirSync(join(index, '..', directory))
+      writeFileSync(join(index, '..', directory, 'chunk-Ab12Cd34.js'), 'export {}')
+    }
+    writeFileSync(join(index, '..', 'favicon.svg'), '<svg/>')
+    const ctx = new Context()
+    const { server } = fakeHttpServer()
+    let resource: ((request: Request) => Promise<Response>) | undefined
+    server.registerFallback = ((fallback: { resource: typeof resource }) => {
+      resource = fallback.resource
+      return () => {}
+    }) as WebServer['registerFallback']
+    ctx.provide('webServer', server)
+    provideConnection(ctx)
+    provideLoader(ctx)
+    apply(ctx, new Config({ openBrowser: false, printUrl: false, surfaceContext: false }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const serve = resource
+    if (serve === undefined) throw new Error('web-app did not register the frontend fallback')
+    const cacheControl = async (url: string): Promise<unknown> => {
+      const response = await serve(new Request(`http://127.0.0.1${url}`))
+      return response.headers.get('cache-control')
+    }
+    expect(await cacheControl('/assets/chunk-Ab12Cd34.js')).toBe('public, max-age=31536000, immutable')
+    expect(await cacheControl('/preview/chunk-Ab12Cd34.js')).toBe('public, max-age=31536000, immutable')
+    expect(await cacheControl('/favicon.svg')).toBe('no-cache')
+  })
+
   it('publishes no readiness side effect when printing and browser opening are disabled', async () => {
     stageDist()
     const ctx = new Context()

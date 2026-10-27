@@ -81,7 +81,7 @@ application combo 脚本只携带每个插件的 `client.js` 入口，并在启�
 
 Node 半侧逐包增量扫描——没有全量重扫路径。每次发出 `internal/plugin` 事件时，系统都会把该 fiber 的 entry 名标脏；微任务 flush 会把每个脏名与当前 loader 条目对账，激活 pass 会初始化同一个脏集合并同步 flush，因此首次扫描与稳态共用同一实现。每次对账都会重新读取包 manifest 与 bundle 元数据，因此包在重新安装、升级或移动之后重启的条目会发布其当前的 `dsh.client` 声明与客户端导出；读到相同 manifest 与 bundle 元数据的对账不发布任何内容，也不读取 bundle 字节；未变化的 bundle 保留其 revision，因此浏览器会保留已加载的插件。解析出的 manifest 包名作为浏览器模块身份。若不同的 active Loader source 解析到同一包名，组合会失败；移除冲突来源后，剩余来源无需重启 fiber 即可接替。没有伴随条目重启的 bundle 重建经 `rebuilt()`（HMR 钩子）进入图。
 
-Node 半侧会在发布前快照每个 `client.js` 入口，并在不构建响应 body 的情况下创建 combo descriptor。它把资源分组为 combo 路由键（`/plugins/??...&rev=...`）：modules row 使用一个 bootstrap combo，其余 row 使用一个或多个 application combo；每个阶段都会在 URL 超过 3 KiB 之前分区。启动图与批次描述符携带同一路由键的应用目录相对形式（`plugins/??...&rev=...`），浏览器文档会按其自身挂载解析它，而响应表仍以绝对路由为键；source-map trailer 则相对该 combo 脚本自身目录解析。脚本 body 在首次 `GET` 时只组合一次，并以对应的 map 引用结尾；map 文件则在首次 map `GET` 时单独读取、校验并组合，`HEAD` 不会物化任一 body。Host 不扫描也不预加载同级 chunk：精确的 `/plugins/<package>/client.<name>.js?rev=<rev>` 请求会通过异步文件 API 读取该脚本并缓存，因此首次异步读取时才物化文件的文件系统也能提供它；其 map 仍会等到 map URL 被请求后才计算。浏览器从所属 row 派生出该 chunk 引用，因此它同样是文档相对形式（`plugins/<package>/client.<name>.js?rev=<rev>`）；chunk 脚本携带的 map trailer 则是裸文件名 `client.<name>.js.map?rev=<rev>`，由该脚本自身目录解析。每个 combo 或 chunk map 都是 Indexed Source Map v3，并在可用时使用作者提供的 section，否则为已打包 bundle 生成 identity section。首次发布与 HMR 都从入口的 `mtimeMs`、`ctimeMs` 和大小派生逐插件 revision，不对产物内容求哈希。状态变更时间用于区分保留 mtime 和大小的重写。未变化的产物因此会跨 Host 重启保持 revision，SSE 重连不会替换其浏览器插件。共享预设会在该包所有输出写完后标记 `client.js`，因此仅 chunk 发生重建也会更换 owner revision，无需 Host 扫描 chunk。combo revision 从有序 row revision 派生。已公告的 combo 响应与已请求的 chunk 响应会跨无关图重组保持不可变；未知资源或 revision 返回 404。
+Node 半侧会在发布前快照每个 `client.js` 入口，并在不构建响应 body 的情况下创建 combo descriptor。它把资源分组为 combo 路由键（`/plugins/??...&rev=...`）：modules row 使用一个 bootstrap combo，其余 row 使用一个或多个 application combo；每个阶段都会在 URL 超过 3 KiB 之前分区。启动图与批次描述符携带同一路由键的应用目录相对形式（`plugins/??...&rev=...`），浏览器文档会按其自身挂载解析它，而响应表仍以绝对路由为键；source-map trailer 则相对该 combo 脚本自身目录解析。脚本 body 在首次 `GET` 时只组合一次，并以对应的 map 引用结尾；map 文件则在首次 map `GET` 时单独读取、校验并组合，`HEAD` 不会物化任一 body。Host 不会预先物化任何同级 chunk：精确的 `/plugins/<package>/client.<name>.js?rev=<rev>` 请求会通过异步文件 API 读取该脚本并缓存，因此首次异步读取时才物化文件的文件系统也能提供它；其 map 仍会等到 map URL 被请求后才计算。浏览器从所属 row 派生出该 chunk 引用，因此它同样是文档相对形式（`plugins/<package>/client.<name>.js?rev=<rev>`）；chunk 脚本携带的 map trailer 则是裸文件名 `client.<name>.js.map?rev=<rev>`，由该脚本自身目录解析。每个 combo 或 chunk map 都是 Indexed Source Map v3，并在可用时使用作者提供的 section，否则为已打包 bundle 生成 identity section。首次发布与 HMR 都从该插件已产出客户端产物的字节派生逐插件 revision：入口 bundle 与其每个同级 chunk，因为 chunk URL 携带其 owner 的 revision。source map 不属于该集合，因此仅 map 变化不会移动 revision。未变化的产物因此会跨 Host 重启保持 revision，SSE 重连不会替换其浏览器插件。combo revision 从有序 row revision 派生。已公告的 combo 响应与已请求的 chunk 响应会跨无关图重组保持不可变；未知资源或 revision 返回 404。
 
 ### 启动 manifest 注入
 
@@ -138,7 +138,7 @@ bundle 路由随注入的 `webServer` 生命周期注册：服务就绪时注册
 
 这些限制说明模块系统不做什么。它们是当前包约束，不是任务积压。
 
-- **基于元数据的 revision**——revision 标识文件系统代际，而非内容相等性。仅元数据变化也可能重载插件；mtime、ctime 和大小都无法反映的变化无法区分。
+- **revision 派生会读取产物字节**——重建通知需要先读取入口 bundle 与每个同级 chunk，才能判断 revision 是否移动；何时读取仍由 HMR watch 的元数据差量决定。
 - **有意采用扁平模块图**——每个 bundle 是一个模块节点，其边只指向表中的叶节点；接口（`loadCache`/`edges`/`invalidate`）已经支持通用模块图，因此可以改变 externalization 粒度而不更改接口。
 - **Host release 检测依赖图事件流**——页面只能从图帧得知 Host 换了 release。重启中的 Host 若在注册路由之前对 `/plugins/events` 返回非 200 状态，浏览器会永久关闭该事件流，页面在刷新前既不更新插件，也检测不到 release 变化。
 - **源码启动时 Host 半侧没有构建步骤**——从 TypeScript 源码启动的 Host 读取 `pnpm run dev:web` 放入其环境的 commit；没有该值的源码启动只发布版本号。
